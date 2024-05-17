@@ -1,0 +1,11 @@
+[package]
+name = "html_validator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = "4.5.4"
+markup5ever_rcdom = "0.3.0"
+html5ever = "0.27.0"
+cssparser = "0.34.0"
+tendril = "0.4.3"
