@@ -6,6 +6,7 @@ use clap::{Arg, Command};
 use html5ever::{parse_document, ParseOpts, tendril::{StrTendril, TendrilSink}};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use markup5ever::QualName;
+use colored::*;
 
 fn main() {
     let matches = Command::new("HTML Validator")
@@ -21,8 +22,11 @@ fn main() {
     let filename = matches.get_one::<String>("input").unwrap();
 
     match validate_html_file(filename) {
-        Ok(_) => println!("HTML validation completed successfully."),
-        Err(e) => println!("Error: {}", e),
+        Ok(_) => println!("{}", "No validation errors found.".green()),
+        Err(e) => {
+            println!("{}", "HTML validation failed with errors:".red().bold());
+            println!("{}", e.red());
+        },
     }
 }
 
@@ -42,21 +46,17 @@ fn validate_html_file(filename: &str) -> Result<(), String> {
         .read_from(&mut Cursor::new(bytes))
         .map_err(|_| "Error parsing HTML document".to_string())?;
 
-    println!("Parsed HTML document:");
+    println!("{}", "Parsed HTML document:".cyan());
     let mut validator = HtmlValidator::new();
-    validator.traverse_dom(&dom.document, 0);
+    validator.traverse_dom(&dom.document);
 
     validator.context.check_document_structure(&mut validator.errors);
 
     if validator.errors.is_empty() {
-        println!("No validation errors found.");
+        Ok(())
     } else {
-        for error in validator.errors {
-            println!("Validation Error: {}", error);
-        }
+        Err(validator.errors.join("\n"))
     }
-
-    Ok(())
 }
 
 struct HtmlValidator {
@@ -72,15 +72,13 @@ impl HtmlValidator {
         }
     }
 
-    fn traverse_dom(&mut self, handle: &Handle, depth: usize) {
-        let indent = " ".repeat(depth * 2);
-
+    fn traverse_dom(&mut self, handle: &Handle) {
         match &handle.data {
             NodeData::Document => {
-                println!("{}Document", indent);
+                println!("{}", "Document".bold());
             },
             NodeData::Doctype { name, .. } => {
-                println!("{}Doctype: {}", indent, name);
+                println!("{}: {}", "Doctype".bold(), name);
                 self.validate_doctype(name);
             },
             NodeData::Element { ref name, ref attrs, .. } => {
@@ -90,24 +88,24 @@ impl HtmlValidator {
                 let attrs_str: Vec<_> = attrs_vec.iter()
                     .map(|(name, value)| format!("{}=\"{}\"", name, value))
                     .collect();
-                println!("{}Element: <{} {}>", indent, name.local, attrs_str.join(" "));
+                println!("{}: <{} {}>", "Element".bold(), name.local, attrs_str.join(" "));
 
                 self.context.update_context(name);
                 self.validate_unique_elements(name);
-                self.validate_attributes(name, &attrs_vec, depth);
-                self.validate_void_elements(name, handle, depth);
+                self.validate_attributes(name, &attrs_vec);
+                self.validate_void_elements(name, handle);
             },
             NodeData::Text { ref contents } => {
-                self.print_text(contents, indent);
+                self.print_text(contents);
             },
             NodeData::Comment { ref contents } => {
-                self.print_comment(contents, indent);
+                self.print_comment(contents);
             },
-            _ => println!("{}Other node type", indent),
+            _ => println!("{}", "Other node type".bold()),
         }
 
         for child in handle.children.borrow().iter() {
-            self.traverse_dom(child, depth + 1);
+            self.traverse_dom(child);
         }
     }
 
@@ -115,7 +113,7 @@ impl HtmlValidator {
         if name == "html" {
             self.context.has_doctype = true;
         } else {
-            self.errors.push(format!("Invalid doctype: {}", name));
+            self.errors.push(format!("Invalid doctype: {}. Expected <!DOCTYPE html>.", name));
         }
     }
 
@@ -123,12 +121,12 @@ impl HtmlValidator {
         let unique_tags = ["title", "base"];
         if unique_tags.contains(&name.local.as_ref()) {
             if !self.context.unique_elements.insert(name.local.as_ref().to_string()) {
-                self.errors.push(format!("Multiple <{}> elements found.", name.local));
+                self.errors.push(format!("Multiple <{}> elements found. There should only be one <{}> element.", name.local, name.local));
             }
         }
     }
 
-    fn validate_attributes(&mut self, name: &QualName, attrs_vec: &Vec<(markup5ever::LocalName, StrTendril)>, depth: usize) {
+    fn validate_attributes(&mut self, name: &QualName, attrs_vec: &[(markup5ever::LocalName, StrTendril)]) {
         let attrs_map: HashMap<_, _> = attrs_vec.iter()
             .map(|(name, value)| (name.as_ref().to_string(), value.as_ref().to_string()))
             .collect();
@@ -136,40 +134,38 @@ impl HtmlValidator {
         match name.local.as_ref() {
             "img" => {
                 if !attrs_map.contains_key("src") {
-                    self.errors.push(format!("Missing 'src' attribute in <img> tag at depth {}", depth));
+                    self.errors.push("<img> tag is missing 'src' attribute.".to_string());
                 }
                 if !attrs_map.contains_key("alt") {
-                    self.errors.push(format!("Missing 'alt' attribute in <img> tag at depth {}", depth));
+                    self.errors.push("<img> tag is missing 'alt' attribute.".to_string());
                 }
             },
             "a" => {
                 if !attrs_map.contains_key("href") {
-                    self.errors.push(format!("Missing 'href' attribute in <a> tag at depth {}", depth));
+                    self.errors.push("<a> tag is missing 'href' attribute.".to_string());
                 }
             },
             _ => (),
         }
     }
 
-    fn validate_void_elements(&mut self, name: &QualName, handle: &Handle, depth: usize) {
+    fn validate_void_elements(&mut self, name: &QualName, handle: &Handle) {
         let void_elements = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"];
         if void_elements.contains(&name.local.as_ref()) && !handle.children.borrow().is_empty() {
-            self.errors.push(format!("Void element <{}> should not have children at depth {}", name.local, depth));
+            self.errors.push(format!("Void element <{}> should not have children.", name.local));
         }
     }
 
-    fn print_text(&self, contents: &RefCell<StrTendril>, indent: String) {
-        let trimmed_text = {
-            let borrowed_contents = contents.borrow();
-            borrowed_contents.trim().to_owned()
-        };
+    fn print_text(&self, contents: &RefCell<StrTendril>) {
+        let borrowed_contents = contents.borrow();
+        let trimmed_text = borrowed_contents.trim();
         if !trimmed_text.is_empty() {
-            println!("{}Text: \"{}\"", indent, trimmed_text);
+            println!("{}: \"{}\"", "Text".bold(), trimmed_text);
         }
     }
 
-    fn print_comment(&self, contents: &StrTendril, indent: String) {
-        println!("{}Comment: <!--{}-->", indent, contents);
+    fn print_comment(&self, contents: &StrTendril) {
+        println!("{}: <!--{}-->", "Comment".bold(), contents);
     }
 }
 
@@ -201,6 +197,7 @@ impl ValidationContext {
         }
     }
 
+    //noinspection ALL
     fn check_document_structure(&self, errors: &mut Vec<String>) {
         if !self.has_doctype {
             errors.push("Missing <!DOCTYPE html> declaration.".to_string());
