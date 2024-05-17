@@ -1,10 +1,11 @@
-use std::fs::File;
-use std::io::{BufReader, Read, Cursor};
-use clap::{Arg, Command};
-use html5ever::{tendril::{TendrilSink, StrTendril}, parse_document};
-use html5ever::driver::ParseOpts;
-use markup5ever_rcdom::{RcDom, Handle, NodeData};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufReader, Cursor, Read};
+use clap::{Arg, Command};
+use html5ever::{parse_document, ParseOpts, tendril::{StrTendril, TendrilSink}};
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
+use markup5ever::QualName;
 
 fn main() {
     let matches = Command::new("HTML Validator")
@@ -42,22 +43,134 @@ fn validate_html_file(filename: &str) -> Result<(), String> {
         .map_err(|_| "Error parsing HTML document".to_string())?;
 
     println!("Parsed HTML document:");
-    let mut errors = vec![];
-    let mut context = ValidationContext::new();
-    traverse_dom(&dom.document, 0, &mut errors, &mut context);
+    let mut validator = HtmlValidator::new();
+    validator.traverse_dom(&dom.document, 0);
 
-    // Post traversal checks
-    context.check_document_structure(&mut errors);
+    validator.context.check_document_structure(&mut validator.errors);
 
-    if errors.is_empty() {
+    if validator.errors.is_empty() {
         println!("No validation errors found.");
     } else {
-        for error in errors {
+        for error in validator.errors {
             println!("Validation Error: {}", error);
         }
     }
 
     Ok(())
+}
+
+struct HtmlValidator {
+    context: ValidationContext,
+    errors: Vec<String>,
+}
+
+impl HtmlValidator {
+    fn new() -> Self {
+        Self {
+            context: ValidationContext::new(),
+            errors: Vec::new(),
+        }
+    }
+
+    fn traverse_dom(&mut self, handle: &Handle, depth: usize) {
+        let indent = " ".repeat(depth * 2);
+
+        match &handle.data {
+            NodeData::Document => {
+                println!("{}Document", indent);
+            },
+            NodeData::Doctype { name, .. } => {
+                println!("{}Doctype: {}", indent, name);
+                self.validate_doctype(name);
+            },
+            NodeData::Element { ref name, ref attrs, .. } => {
+                let attrs_vec: Vec<_> = attrs.borrow().iter()
+                    .map(|attr| (attr.name.local.clone(), attr.value.clone()))
+                    .collect();
+                let attrs_str: Vec<_> = attrs_vec.iter()
+                    .map(|(name, value)| format!("{}=\"{}\"", name, value))
+                    .collect();
+                println!("{}Element: <{} {}>", indent, name.local, attrs_str.join(" "));
+
+                self.context.update_context(name);
+                self.validate_unique_elements(name);
+                self.validate_attributes(name, &attrs_vec, depth);
+                self.validate_void_elements(name, handle, depth);
+            },
+            NodeData::Text { ref contents } => {
+                self.print_text(contents, indent);
+            },
+            NodeData::Comment { ref contents } => {
+                self.print_comment(contents, indent);
+            },
+            _ => println!("{}Other node type", indent),
+        }
+
+        for child in handle.children.borrow().iter() {
+            self.traverse_dom(child, depth + 1);
+        }
+    }
+
+    fn validate_doctype(&mut self, name: &str) {
+        if name == "html" {
+            self.context.has_doctype = true;
+        } else {
+            self.errors.push(format!("Invalid doctype: {}", name));
+        }
+    }
+
+    fn validate_unique_elements(&mut self, name: &QualName) {
+        let unique_tags = ["title", "base"];
+        if unique_tags.contains(&name.local.as_ref()) {
+            if !self.context.unique_elements.insert(name.local.as_ref().to_string()) {
+                self.errors.push(format!("Multiple <{}> elements found.", name.local));
+            }
+        }
+    }
+
+    fn validate_attributes(&mut self, name: &QualName, attrs_vec: &Vec<(markup5ever::LocalName, StrTendril)>, depth: usize) {
+        let attrs_map: HashMap<_, _> = attrs_vec.iter()
+            .map(|(name, value)| (name.as_ref().to_string(), value.as_ref().to_string()))
+            .collect();
+
+        match name.local.as_ref() {
+            "img" => {
+                if !attrs_map.contains_key("src") {
+                    self.errors.push(format!("Missing 'src' attribute in <img> tag at depth {}", depth));
+                }
+                if !attrs_map.contains_key("alt") {
+                    self.errors.push(format!("Missing 'alt' attribute in <img> tag at depth {}", depth));
+                }
+            },
+            "a" => {
+                if !attrs_map.contains_key("href") {
+                    self.errors.push(format!("Missing 'href' attribute in <a> tag at depth {}", depth));
+                }
+            },
+            _ => (),
+        }
+    }
+
+    fn validate_void_elements(&mut self, name: &QualName, handle: &Handle, depth: usize) {
+        let void_elements = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"];
+        if void_elements.contains(&name.local.as_ref()) && !handle.children.borrow().is_empty() {
+            self.errors.push(format!("Void element <{}> should not have children at depth {}", name.local, depth));
+        }
+    }
+
+    fn print_text(&self, contents: &RefCell<StrTendril>, indent: String) {
+        let trimmed_text = {
+            let borrowed_contents = contents.borrow();
+            borrowed_contents.trim().to_owned()
+        };
+        if !trimmed_text.is_empty() {
+            println!("{}Text: \"{}\"", indent, trimmed_text);
+        }
+    }
+
+    fn print_comment(&self, contents: &StrTendril, indent: String) {
+        println!("{}Comment: <!--{}-->", indent, contents);
+    }
 }
 
 struct ValidationContext {
@@ -79,6 +192,15 @@ impl ValidationContext {
         }
     }
 
+    fn update_context(&mut self, name: &QualName) {
+        match name.local.as_ref() {
+            "html" => self.has_html = true,
+            "head" => self.has_head = true,
+            "body" => self.has_body = true,
+            _ => (),
+        }
+    }
+
     fn check_document_structure(&self, errors: &mut Vec<String>) {
         if !self.has_doctype {
             errors.push("Missing <!DOCTYPE html> declaration.".to_string());
@@ -92,94 +214,5 @@ impl ValidationContext {
         if !self.has_body {
             errors.push("Missing <body> element.".to_string());
         }
-    }
-}
-
-fn traverse_dom(handle: &Handle, depth: usize, errors: &mut Vec<String>, context: &mut ValidationContext) {
-    let indent = " ".repeat(depth * 2);
-
-    match &handle.data {
-        NodeData::Document => {
-            println!("{}Document", indent);
-        },
-        NodeData::Doctype { name, .. } => {
-            println!("{}Doctype: {}", indent, name);
-            if name.to_string() == "html" {
-                context.has_doctype = true;
-            } else {
-                errors.push(format!("Invalid doctype: {}", name));
-            }
-        },
-        NodeData::Element { ref name, ref attrs, .. } => {
-            let attrs_vec: Vec<_> = attrs.borrow().iter()
-                .map(|attr| (attr.name.local.clone(), attr.value.clone()))
-                .collect();
-            let attrs_str: Vec<_> = attrs_vec.iter()
-                .map(|(name, value)| format!("{}=\"{}\"", name, value))
-                .collect();
-            println!("{}Element: <{} {}>", indent, name.local, attrs_str.join(" "));
-
-            // Update context for document structure validation
-            match name.local.as_ref() {
-                "html" => context.has_html = true,
-                "head" => context.has_head = true,
-                "body" => context.has_body = true,
-                _ => (),
-            }
-
-            // Validate unique elements
-            let unique_tags = ["title", "base"];
-            if unique_tags.contains(&name.local.as_ref()) {
-                if !context.unique_elements.insert(name.local.as_ref().to_string()) {
-                    errors.push(format!("Multiple <{}> elements found.", name.local));
-                }
-            }
-
-            // Example validation: check for missing required attributes in <img> tags
-            if name.local.as_ref() == "img" {
-                let attrs_map: HashMap<_, _> = attrs_vec.iter()
-                    .map(|(name, value)| (name.as_ref().to_string(), value.as_ref().to_string()))
-                    .collect();
-                if !attrs_map.contains_key("src") {
-                    errors.push(format!("Missing 'src' attribute in <img> tag at depth {}", depth));
-                }
-                if !attrs_map.contains_key("alt") {
-                    errors.push(format!("Missing 'alt' attribute in <img> tag at depth {}", depth));
-                }
-            }
-
-            // Validate <a> tags
-            if name.local.as_ref() == "a" {
-                let attrs_map: HashMap<_, _> = attrs_vec.iter()
-                    .map(|(name, value)| (name.as_ref().to_string(), value.as_ref().to_string()))
-                    .collect();
-                if !attrs_map.contains_key("href") {
-                    errors.push(format!("Missing 'href' attribute in <a> tag at depth {}", depth));
-                }
-            }
-
-            // Validate void elements
-            let void_elements = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"];
-            if void_elements.contains(&name.local.as_ref()) && !handle.children.borrow().is_empty() {
-                errors.push(format!("Void element <{}> should not have children at depth {}", name.local, depth));
-            }
-        },
-        NodeData::Text { ref contents } => {
-            let trimmed_text = {
-                let borrowed_contents = contents.borrow();
-                borrowed_contents.trim().to_owned()
-            };
-            if !trimmed_text.is_empty() {
-                println!("{}Text: \"{}\"", indent, trimmed_text);
-            }
-        },
-        NodeData::Comment { ref contents } => {
-            println!("{}Comment: <!--{}-->", indent, contents);
-        },
-        _ => println!("{}Other node type", indent),
-    }
-
-    for child in handle.children.borrow().iter() {
-        traverse_dom(child, depth + 1, errors, context);
     }
 }

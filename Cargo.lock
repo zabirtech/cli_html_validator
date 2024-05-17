@@ -182,6 +182,7 @@ dependencies = [
  "clap",
  "cssparser",
  "html5ever",
+ "markup5ever",
  "markup5ever_rcdom",
  "tendril",
 ]
