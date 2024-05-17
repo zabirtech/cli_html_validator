@@ -149,6 +149,7 @@ impl HtmlValidator {
         }
     }
 
+    #[allow(clippy::needless_borrow)]
     fn validate_void_elements(&mut self, name: &QualName, handle: &Handle) {
         let void_elements = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"];
         if void_elements.contains(&name.local.as_ref()) && !handle.children.borrow().is_empty() {
