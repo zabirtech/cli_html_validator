@@ -11,6 +11,7 @@ use tui::widgets::{Block, Borders, Paragraph};
 use tui::layout::{Layout, Constraint, Direction};
 use tui::text::{Span, Spans};
 use tui::style::{Style, Color, Modifier};
+use tui::widgets::Wrap;
 use colored::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
+// noinspection ALL
 fn run_app<B: tui::backend::Backend>(terminal: &mut Terminal<B>, filename: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Read HTML content
     let html_content = std::fs::read_to_string(filename).map_err(|_| "Error reading file contents".to_string())?;
@@ -56,12 +57,37 @@ fn run_app<B: tui::backend::Backend>(terminal: &mut Terminal<B>, filename: &str)
     // Validate HTML and get result
     let result = validate_html_file(filename);
 
+    let mut html_scroll: u16 = 0;
+    let mut result_scroll: u16 = 0;
+    let mut selected_box = 0; // 0: HTML Box, 1: Result Box
+
     loop {
         // Read terminal events
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
-                    return Ok(());
+                match key.code {
+                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Down => {
+                        if selected_box == 0 {
+                            html_scroll = html_scroll.saturating_add(1);
+                        } else {
+                            result_scroll = result_scroll.saturating_add(1);
+                        }
+                    },
+                    KeyCode::Up => {
+                        if selected_box == 0 {
+                            html_scroll = html_scroll.saturating_sub(1);
+                        } else {
+                            result_scroll = result_scroll.saturating_sub(1);
+                        }
+                    },
+                    KeyCode::Right => {
+                        selected_box = 1;
+                    },
+                    KeyCode::Left => {
+                        selected_box = 0;
+                    },
+                    _ => {}
                 }
             }
         }
@@ -74,15 +100,22 @@ fn run_app<B: tui::backend::Backend>(terminal: &mut Terminal<B>, filename: &str)
                 .split(f.size());
 
             // HTML Content Box
-            let html_block = Block::default().borders(Borders::ALL).title("HTML Validator");
+            let html_block = Block::default()
+                .borders(Borders::ALL)
+                .title("HTML Validator")
+                .border_style(if selected_box == 0 { Style::default().fg(Color::Green) } else { Style::default() });
             let html_paragraph = Paragraph::new(html_content.as_ref())
                 .block(html_block)
-                .wrap(tui::widgets::Wrap { trim: true });
+                .wrap(Wrap { trim: true })
+                .scroll((html_scroll, 0));
 
             f.render_widget(html_paragraph, chunks[0]);
 
             // Result Box
-            let result_block = Block::default().borders(Borders::ALL).title("Validation Results");
+            let result_block = Block::default()
+                .borders(Borders::ALL)
+                .title("Validation Results")
+                .border_style(if selected_box == 1 { Style::default().fg(Color::Green) } else { Style::default() });
 
             let result_text = match &result {
                 Ok(_) => vec![Spans::from(Span::styled("No validation errors found.", Style::default().fg(Color::Green)))],
@@ -92,7 +125,8 @@ fn run_app<B: tui::backend::Backend>(terminal: &mut Terminal<B>, filename: &str)
 
             let result_paragraph = Paragraph::new(result_text)
                 .block(result_block)
-                .wrap(tui::widgets::Wrap { trim: true });
+                .wrap(Wrap { trim: true })
+                .scroll((result_scroll, 0));
 
             f.render_widget(result_paragraph, chunks[1]);
         })?;
